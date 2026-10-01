@@ -1,10 +1,14 @@
 package com.mingyu.livephoto
 
 import java.io.ByteArrayOutputStream
+import java.text.SimpleDateFormat
 import java.util.Base64
+import java.util.Date
+import java.util.Locale
 
 /**
- * OPPO 实况照片 (.JPG) 二进制组装，与 mp4_to_oppo_livephoto.py 逐字节一致。
+ * OPPO 实况照片 (.JPG) 二进制组装，与 mp4_to_oppo_livephoto.py 逐字节一致
+ * （两端都把源视频拍摄时间写进同一组 EXIF 日期条目，取值规则也相同）。
  * 布局 [SOI][APP1 XMP][APP1 EXIF][APP2 MPF][APP0 JFIF][APP2 ICC][图像核心][MP4 尾部]
  */
 object MotionPhotoFormat {
@@ -103,23 +107,67 @@ object MotionPhotoFormat {
     }
 
     /** TIFF: MM 大端 + IFD(宽/高/ExifIFD/方向) + ExifIFD(UserComment/LightSource) */
-    fun buildExifPayload(width: Int, height: Int): ByteArray {
+    fun buildExifPayload(width: Int, height: Int): ByteArray = buildExifPayload(width, height, null)
+
+    /**
+     * [dateTime] 为 null 时保持与 PC 脚本逐字节一致的 112 字节布局；
+     * 给定 "yyyy:MM:dd HH:mm:ss" 时追加 IFD0 DateTime + Exif DateTimeOriginal/DateTimeDigitized，
+     * 媒体库扫描器据此把拍摄时间填成源视频时间，相册才会按源时间排序。
+     */
+    fun buildExifPayload(width: Int, height: Int, dateTime: String?): ByteArray {
+        val ascii = (dateTime?.plus('\u0000'))?.toByteArray(Charsets.US_ASCII)
+        val dateLen = ascii?.size ?: 0
+        val ifd0Count = if (ascii == null) 4 else 5
+        val exifCount = if (ascii == null) 2 else 4
+        val exifOffset = 8 + 2 + ifd0Count * 12 + 4
+        var dataOffset = exifOffset + 2 + exifCount * 12 + 4
+
+        val ifd0 = Be()
+        ifd0.u16(ifd0Count)
+        ifd0.u16(0x0100).u16(4).u32(1).u32(width.toLong())
+        ifd0.u16(0x0101).u16(4).u32(1).u32(height.toLong())
+        if (ascii == null) {
+            // 无日期时保持参考文件的原始条目顺序
+            ifd0.u16(0x8769).u16(4).u32(1).u32(exifOffset.toLong())
+            ifd0.u16(0x0112).u16(3).u32(1).u32(0)
+        } else {
+            ifd0.u16(0x0112).u16(3).u32(1).u32(0)
+            ifd0.u16(0x0132).u16(2).u32(dateLen.toLong()).u32(dataOffset.toLong())
+            dataOffset += dateLen
+            ifd0.u16(0x8769).u16(4).u32(1).u32(exifOffset.toLong())
+        }
+        ifd0.u32(0)
+
+        val exif = Be()
+        exif.u16(exifCount)
+        if (ascii != null) {
+            exif.u16(0x9003).u16(2).u32(dateLen.toLong()).u32(dataOffset.toLong())
+            dataOffset += dateLen
+            exif.u16(0x9004).u16(2).u32(dateLen.toLong()).u32(dataOffset.toLong())
+            dataOffset += dateLen
+            exif.u16(0x9208).u16(4).u32(1).u32(0)
+            exif.u16(0x9286).u16(2).u32(USER_COMMENT.size.toLong()).u32(dataOffset.toLong())
+        } else {
+            exif.u16(0x9286).u16(2).u32(USER_COMMENT.size.toLong()).u32(dataOffset.toLong())
+            exif.u16(0x9208).u16(4).u32(1).u32(0)
+        }
+        exif.u32(0)
+
         val tiff = Be()
         tiff.raw("MM\u0000*".toByteArray(Charsets.US_ASCII))
         tiff.u32(8)
-        tiff.u16(4)
-        tiff.u16(0x0100).u16(4).u32(1).u32(width.toLong())
-        tiff.u16(0x0101).u16(4).u32(1).u32(height.toLong())
-        tiff.u16(0x8769).u16(4).u32(1).u32(0x3E)
-        tiff.u16(0x0112).u16(3).u32(1).u32(0)
-        tiff.u32(0)
-        tiff.u16(2)
-        tiff.u16(0x9286).u16(2).u32(USER_COMMENT.size.toLong()).u32(0x5C)
-        tiff.u16(0x9208).u16(4).u32(1).u32(0)
-        tiff.u32(0)
+        tiff.raw(ifd0.bytes())
+        tiff.raw(exif.bytes())
+        if (ascii != null) {
+            repeat(3) { tiff.raw(ascii) }
+        }
         tiff.raw(USER_COMMENT)
         return "Exif\u0000\u0000".toByteArray(Charsets.US_ASCII) + tiff.bytes()
     }
+
+    /** EXIF 时间用本地时区分秒精度，无时区字段 */
+    fun formatExifDate(epochMs: Long): String =
+        SimpleDateFormat("yyyy:MM:dd HH:mm:ss", Locale.US).format(Date(epochMs))
 
     /** MPEntry = {attr=0x30000, size=JPEG 部分长度, offset=0} */
     fun buildMpfPayload(jpegLen: Long): ByteArray {
@@ -176,12 +224,12 @@ object MotionPhotoFormat {
     }
 
     /** 生成实况照片的 JPEG 部分（以 EOI 结尾，其后直接拼接 MP4） */
-    fun buildJpegPart(cover: ByteArray, tsUs: Long, videoLen: Long): ByteArray {
+    fun buildJpegPart(cover: ByteArray, tsUs: Long, videoLen: Long, dateTime: String? = null): ByteArray {
         val core = coverCore(cover)
         val dims = readCoverDims(core)
 
         val xmpSeg = appSeg(0xE1, buildXmpPayload(tsUs, videoLen))
-        val exifSeg = appSeg(0xE1, buildExifPayload(dims[0], dims[1]))
+        val exifSeg = appSeg(0xE1, buildExifPayload(dims[0], dims[1], dateTime))
         val jfifSeg = appSeg(0xE0, JFIF_PAYLOAD)
         val iccSeg = appSeg(0xE2, ICC_PAYLOAD)
 

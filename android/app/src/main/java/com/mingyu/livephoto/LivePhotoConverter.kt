@@ -84,9 +84,10 @@ class LivePhotoConverter(private val context: Context) {
                 return@withContext ConversionResult(name, Status.SKIPPED_OVERSIZE, oversizeText(size, maxMB))
             }
             val srcMtime = sourceMtimeMs(uri)
+            val captureMs = sourceCaptureMs(uri) ?: srcMtime
             for (attempt in 0..retries) {
                 try {
-                    val livePhoto = buildLivePhoto(temp)
+                    val livePhoto = buildLivePhoto(temp, captureMs)
                     val target = write(livePhoto, fileName, srcMtime)
                     val note = if (isOversize(size, maxMB)) "（超过阈值，已按设置包含）" else ""
                     return@withContext ConversionResult(name, Status.OK, "$target$note")
@@ -104,9 +105,10 @@ class LivePhotoConverter(private val context: Context) {
     }
 
     /** 完整流水线：抽中点帧做封面 -> 组装 JPEG 段 -> 零间隙拼接原始 MP4 字节 */
-    fun buildLivePhoto(video: File): ByteArray {
+    fun buildLivePhoto(video: File, captureMs: Long? = null): ByteArray {
         val (cover, tsUs) = extractMiddleFrame(video)
-        val jpegPart = MotionPhotoFormat.buildJpegPart(cover, tsUs, video.length())
+        val dateTime = captureMs?.let(MotionPhotoFormat::formatExifDate)
+        val jpegPart = MotionPhotoFormat.buildJpegPart(cover, tsUs, video.length(), dateTime)
         return jpegPart + video.readBytes()
     }
 
@@ -126,6 +128,23 @@ class LivePhotoConverter(private val context: Context) {
             if (c.moveToFirst() && !c.isNull(0)) {
                 val v = c.getLong(0)
                 if (v > 0) return v
+            }
+        }
+        return null
+    }
+
+    /**
+     * 源视频的拍摄时间（毫秒），读不到返回 null。相册排序读的是封面 EXIF 的 DateTimeOriginal，
+     * 所以要把这个时间写进产物 JPEG；DATE_TAKEN 优先，其次文件 mtime。
+     */
+    private fun sourceCaptureMs(uri: Uri): Long? {
+        val resolver = context.contentResolver
+        runCatching {
+            resolver.query(uri, arrayOf(MediaStore.MediaColumns.DATE_TAKEN), null, null, null)?.use { c ->
+                if (c.moveToFirst() && !c.isNull(0)) {
+                    val v = c.getLong(0)
+                    if (v > 0) return v
+                }
             }
         }
         return null

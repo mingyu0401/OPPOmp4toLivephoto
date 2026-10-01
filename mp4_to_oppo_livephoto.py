@@ -5,7 +5,7 @@
 
 输出格式 1:1 对齐 OPPO Live Photo（参考 makelivephoto.cn 已知可用样本）:
     [SOI][APP1 XMP: GCamera + OpCamera + Container/Item 目录]
-         [APP1 EXIF: UserComment="oplus_8388608"]
+         [APP1 EXIF: UserComment="oplus_8388608" + 拍摄时间]
          [APP2 MPF: MPEntry 指向视频][APP0 JFIF][APP2 ICC]
          [DQT/SOF/DHT/SOS/图像数据/EOI]
          [MP4 直接拼接, faststart, 与 EOI 零间隙]
@@ -17,6 +17,7 @@
 用法:
     python mp4_to_oppo_livephoto.py <输入目录> <输出目录> [--workers 8] [--max-size-mb 50]
                                     [--retries 2] [--include-oversize] [--no-faststart]
+                                    [--no-exif-date]
 """
 
 from __future__ import annotations
@@ -117,6 +118,28 @@ def probe_duration(video: Path) -> float:
     return float(dur)
 
 
+def probe_creation_time(video: Path) -> Optional[datetime]:
+    """MP4 容器里的拍摄时间（mvhd creation_time）。
+
+    相机写的是本地墙上时间，ffprobe 却给裸值加了个 Z，所以这里直接丢掉时区标记，
+    否则会二次偏移；这样与手机端读 MediaStore DATE_TAKEN 的结果一致。
+    """
+    cmd = [
+        "ffprobe", "-v", "error",
+        "-show_entries", "format_tags=creation_time",
+        "-of", "json", str(video),
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    raw = json.loads(r.stdout or "{}").get("format", {}).get("tags", {}).get("creation_time")
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "").replace("+00:00", ""))
+    except ValueError:
+        return None
+    return dt if dt.year >= 1970 else None
+
+
 def extract_middle_frame(video: Path, out_jpg: Path, duration: float) -> int:
     """抽取中间帧，返回 presentation timestamp (微秒)。"""
     ts = max(0.0, duration / 2.0)
@@ -196,23 +219,50 @@ def _app_seg(marker: int, payload: bytes) -> bytes:
     return b"\xff" + bytes([marker]) + struct.pack(">H", len(payload) + 2) + payload
 
 
-def build_exif_payload(width: int, height: int) -> bytes:
-    """112 字节 EXIF 负载: MM TIFF + IFD(宽/高/ExifIFD/方向) + ExifIFD(UserComment/LightSource)。"""
-    tiff = bytearray()
-    tiff += b"MM\x00\x2a\x00\x00\x00\x08"  # 大端, IFD 在偏移 8
-    tiff += struct.pack(">H", 4)
-    tiff += struct.pack(">HHI", 0x0100, 4, 1) + struct.pack(">I", width)   # ImageWidth
-    tiff += struct.pack(">HHI", 0x0101, 4, 1) + struct.pack(">I", height)  # ImageLength
-    tiff += struct.pack(">HHI", 0x8769, 4, 1) + struct.pack(">I", 0x3E)    # ExifIFD 指针
-    tiff += struct.pack(">HHI", 0x0112, 3, 1) + b"\x00\x00\x00\x00"        # Orientation = 0
-    tiff += struct.pack(">I", 0)
-    tiff += struct.pack(">H", 2)
-    tiff += struct.pack(">HHI", 0x9286, 2, len(USER_COMMENT), ) \
-        + struct.pack(">I", 0x5C)                                          # UserComment (ASCII)
-    tiff += struct.pack(">HHI", 0x9208, 4, 1) + struct.pack(">I", 0)       # LightSource
-    tiff += struct.pack(">I", 0)
+def build_exif_payload(width: int, height: int, date_str: Optional[str] = None) -> bytes:
+    """MM TIFF + IFD(宽/高/方向/日期/ExifIFD) + ExifIFD(DateTimeOriginal/DateTimeDigitized/LightSource/UserComment)。
+
+    date_str 为 None 时输出与手机 App 早期版本逐字节一致的 112 字节布局；
+    给定 "yyyy:MM:dd HH:mm:ss" 时相册会按该拍摄时间排序（媒体库扫描读 EXIF）。
+    """
+    ascii_date = (date_str + "\x00").encode("ascii") if date_str else None
+    date_len = len(ascii_date) if ascii_date else 0
+    ifd0_n = 5 if ascii_date else 4
+    exif_n = 4 if ascii_date else 2
+    exif_off = 8 + 2 + ifd0_n * 12 + 4
+    data_off = exif_off + 2 + exif_n * 12 + 4
+
+    ifd0 = struct.pack(">H", ifd0_n)
+    ifd0 += struct.pack(">HHI", 0x0100, 4, 1) + struct.pack(">I", width)   # ImageWidth
+    ifd0 += struct.pack(">HHI", 0x0101, 4, 1) + struct.pack(">I", height)  # ImageLength
+    if ascii_date is None:
+        ifd0 += struct.pack(">HHI", 0x8769, 4, 1) + struct.pack(">I", exif_off)
+        ifd0 += struct.pack(">HHI", 0x0112, 3, 1) + b"\x00\x00\x00\x00"    # Orientation = 0
+    else:
+        ifd0 += struct.pack(">HHI", 0x0112, 3, 1) + b"\x00\x00\x00\x00"    # Orientation = 0
+        ifd0 += struct.pack(">HHI", 0x0132, 2, date_len) + struct.pack(">I", data_off)
+        data_off += date_len
+        ifd0 += struct.pack(">HHI", 0x8769, 4, 1) + struct.pack(">I", exif_off)
+    ifd0 += struct.pack(">I", 0)
+
+    exif = struct.pack(">H", exif_n)
+    if ascii_date is not None:
+        exif += struct.pack(">HHI", 0x9003, 2, date_len) + struct.pack(">I", data_off)
+        data_off += date_len
+        exif += struct.pack(">HHI", 0x9004, 2, date_len) + struct.pack(">I", data_off)
+        data_off += date_len
+        exif += struct.pack(">HHI", 0x9208, 4, 1) + struct.pack(">I", 0)   # LightSource
+        exif += struct.pack(">HHI", 0x9286, 2, len(USER_COMMENT)) + struct.pack(">I", data_off)
+    else:
+        exif += struct.pack(">HHI", 0x9286, 2, len(USER_COMMENT)) + struct.pack(">I", data_off)
+        exif += struct.pack(">HHI", 0x9208, 4, 1) + struct.pack(">I", 0)    # LightSource
+    exif += struct.pack(">I", 0)
+
+    tiff = b"MM\x00\x2a\x00\x00\x00\x08" + ifd0 + exif
+    if ascii_date is not None:
+        tiff += ascii_date * 3
     tiff += USER_COMMENT
-    return b"Exif\x00\x00" + bytes(tiff)
+    return b"Exif\x00\x00" + tiff
 
 
 def build_mpf_payload(jpeg_len: int) -> bytes:
@@ -240,14 +290,15 @@ JFIF_PAYLOAD = b"JFIF\x00\x01\x01\x00\x00\x01\x00\x01"
 MPF_SEG_FIXED_LEN = 2 + 2 + 70  # 段头(2) + 长度(2) + MPF 负载(70)
 
 
-def build_motion_photo(cover_jpg: Path, video: Path, ts_us: int, out_path: Path) -> None:
+def build_motion_photo(cover_jpg: Path, video: Path, ts_us: int, out_path: Path,
+                       date_str: Optional[str] = None) -> None:
     cover_bytes = cover_jpg.read_bytes()
     core = strip_cover_segments(cover_bytes)
     width, height = read_cover_dims(core)
     video_len = video.stat().st_size
 
     xmp_seg = _app_seg(0xE1, build_xmp_payload(ts_us, video_len))
-    exif_seg = _app_seg(0xE1, build_exif_payload(width, height))
+    exif_seg = _app_seg(0xE1, build_exif_payload(width, height, date_str))
     jfif_seg = _app_seg(0xE0, JFIF_PAYLOAD)
     icc_seg = _app_seg(0xE2, ICC_PAYLOAD)
 
@@ -317,6 +368,7 @@ def process_one(
     include_oversize: bool,
     retries: int,
     faststart: bool = True,
+    exif_date: bool = True,
 ) -> tuple[str, Path, Optional[str]]:
     """返回 (status, src, message)；status ∈ {"ok", "skip_oversize", "fail"}"""
     size_mb = src.stat().st_size / (1024 * 1024)
@@ -338,10 +390,12 @@ def process_one(
             else:
                 video_for_embed = src
 
-            build_motion_photo(cover, video_for_embed, ts_us, dst)
-
             created = get_creation_time(src)
             modified = datetime.fromtimestamp(src.stat().st_mtime)
+            shot = probe_creation_time(src) or modified
+            date_str = shot.strftime("%Y:%m:%d %H:%M:%S") if exif_date else None
+            build_motion_photo(cover, video_for_embed, ts_us, dst, date_str)
+
             try:
                 set_creation_time(dst, created)
             except OSError as e:
@@ -388,6 +442,8 @@ def main() -> int:
     ap.add_argument("--retries", type=int, default=2, help="单文件失败重试次数")
     ap.add_argument("--no-faststart", action="store_true",
                     help="不对 MP4 做 faststart 无损重排（默认会重排）")
+    ap.add_argument("--no-exif-date", action="store_true",
+                    help="不往封面 EXIF 写拍摄时间（用于与历史逐字节基准比对）")
     args = ap.parse_args()
 
     if not args.input_dir.exists():
@@ -417,7 +473,7 @@ def main() -> int:
         futures = {
             ex.submit(process_one, v, args.output_dir,
                       args.max_size_mb, args.include_oversize, args.retries,
-                      not args.no_faststart): v
+                      not args.no_faststart, not args.no_exif_date): v
             for v in videos
         }
         bar = tqdm(total=len(futures), unit="file", ncols=90)

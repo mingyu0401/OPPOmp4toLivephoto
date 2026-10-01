@@ -5,6 +5,8 @@
 
 用法:
     python check_livephoto.py <手机端产物.jpg> <PC 参考.jpg> <源视频.mp4>
+
+PC 参考生成：python mp4_to_oppo_livephoto.py <源视频或目录> <参考目录> --no-faststart
 """
 
 from __future__ import annotations
@@ -82,6 +84,42 @@ def dims_from_sof(core: bytes):
     raise AssertionError("core 里没有 SOF 段")
 
 
+def read_ifd(tiff: bytes, start: int):
+    n = int.from_bytes(tiff[start:start + 2], "big")
+    entries = {}
+    for i in range(n):
+        at = start + 2 + i * 12
+        tag = int.from_bytes(tiff[at:at + 2], "big")
+        typ = int.from_bytes(tiff[at + 2:at + 4], "big")
+        count = int.from_bytes(tiff[at + 4:at + 8], "big")
+        entries[tag] = (typ, count, int.from_bytes(tiff[at + 8:at + 12], "big"))
+    return entries
+
+
+def date_fields(payload: bytes):
+    """返回 EXIF 里所有日期条目的 [(tag, 值, TIFF 内偏移, 长度)]"""
+    tiff = payload[6:]
+    ifd0 = read_ifd(tiff, int.from_bytes(tiff[4:8], "big"))
+    exif_off = ifd0.get(0x8769, (0, 0, 0))[2]
+    exif = read_ifd(tiff, exif_off) if exif_off else {}
+    found = []
+    for entries, tags in ((ifd0, (0x0132,)), (exif, (0x9003, 0x9004))):
+        for tag in tags:
+            if tag in entries:
+                _, count, off = entries[tag]
+                value = tiff[off:off + count].split(b"\x00")[0].decode("ascii", "replace")
+                found.append((tag, value, off, count))
+    return found
+
+
+def strip_dates(payload: bytes) -> bytes:
+    """把日期条目的值区清成 0，便于比对除时间以外的 EXIF 结构"""
+    out = bytearray(payload)
+    for _, _, off, count in date_fields(payload):
+        out[6 + off:6 + off + count] = b"\x00" * count
+    return bytes(out)
+
+
 def decodes(path: Path, kind: str) -> None:
     target = path
     if kind == "video":
@@ -124,8 +162,13 @@ def main() -> int:
     da, db = dims_from_sof(a["sof_source"]), dims_from_sof(b["sof_source"])
     if da != db:
         problems.append(f"封面尺寸不同: app {da} vs pc {db}（旋转处理有差异）")
-    if exif_segment(a) != exif_segment(b):
-        problems.append(f"EXIF 段与参考不同: app {exif_segment(a).hex()[:64]} / pc {exif_segment(b).hex()[:64]}")
+    ea, eb = exif_segment(a), exif_segment(b)
+    dates_a = {t: v for t, v, _, _ in date_fields(ea)}
+    dates_b = {t: v for t, v, _, _ in date_fields(eb)}
+    if strip_dates(ea) != strip_dates(eb):
+        problems.append(f"EXIF 结构（除日期外）与参考不同: app {ea.hex()[:64]} / pc {eb.hex()[:64]}")
+    if not dates_a.get(0x9003):
+        problems.append("手机端 EXIF 缺少 DateTimeOriginal，相册会按导入时间排序")
     if icc_segment(a) != icc_segment(b):
         problems.append("ICC 段与参考不同")
 
@@ -134,6 +177,7 @@ def main() -> int:
 
     print(f"手机端: {app_out.name}  JPEG {a['jpeg_len']} B + 视频 {len(a['video'])} B, 封面 {da[0]}x{da[1]}, ts {ts_a} us")
     print(f"PC 参考: {ref.name}  JPEG {b['jpeg_len']} B + 视频 {len(b['video'])} B, 封面 {db[0]}x{db[1]}, ts {ts_b} us")
+    print(f"拍摄时间 EXIF: 手机端 {dates_a.get(0x9003)} / PC {dates_b.get(0x9003)}")
     if problems:
         print("\n不一致:")
         for p in problems:

@@ -1,0 +1,24 @@
+# Android / Gradle 构建产物
+android/.gradle/
+android/**/build/
+android/**/.cxx/
+android/**/*.apk
+android/**/*.aab
+
+# 本机路径与签名，绝不入库
+android/local.properties
+android/app/keystore.properties
+android/app/*.keystore
+
+# 临时文件
+*.log
+.DS_Store
+
+# 测试素材是作者手机原片，不随仓库分发（单测缺素材时自动跳过）
+/inn/
+/ref/
+android/app/src/androidTest/assets/*.mp4
+
+# 一次性探针输出
+/probe_out/
+android/probe_out/

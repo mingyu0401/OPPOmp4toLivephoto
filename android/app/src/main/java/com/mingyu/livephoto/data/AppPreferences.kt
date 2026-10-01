@@ -23,11 +23,13 @@ class AppPreferences private constructor(context: Context) {
         sp.edit().putString(KEY_THEME_COLOR, color.name).apply()
     }
 
-    /** 实况照片写入相册的相对目录 */
-    fun getRelativePath(): String = sp.getString(KEY_RELATIVE_PATH, DEFAULT_RELATIVE_PATH) ?: DEFAULT_RELATIVE_PATH
+    /** 导出目录（SAF tree URI，字符串形式）；null 表示用默认 Download/mingyuoutput */
+    fun getOutputTreeUri(): String? = sp.getString(KEY_OUTPUT_TREE, null)
 
-    fun setRelativePath(path: String) {
-        sp.edit().putString(KEY_RELATIVE_PATH, normalizePath(path)).apply()
+    fun getOutputDirLabel(): String? = sp.getString(KEY_OUTPUT_DIR_LABEL, null)
+
+    fun setOutputTree(uri: String, label: String) {
+        sp.edit().putString(KEY_OUTPUT_TREE, uri).putString(KEY_OUTPUT_DIR_LABEL, label).apply()
     }
 
     fun getMaxMB(): Int = sp.getInt(KEY_MAX_MB, DEFAULT_MAX_MB).coerceIn(5, 200)
@@ -56,16 +58,13 @@ class AppPreferences private constructor(context: Context) {
     }
 
     companion object {
-        const val DEFAULT_RELATIVE_PATH = "DCIM/Camera"
         const val DEFAULT_MAX_MB = 50
         const val DEFAULT_RETRIES = 2
 
-        /** 去掉首尾斜杠与空白，空值回退到默认相册目录 */
-        fun normalizePath(raw: String): String = raw.trim().trim('/').ifEmpty { DEFAULT_RELATIVE_PATH }
-
         private const val KEY_THEME_MODE = "theme_mode"
         private const val KEY_THEME_COLOR = "theme_color"
-        private const val KEY_RELATIVE_PATH = "relative_path"
+        private const val KEY_OUTPUT_TREE = "output_tree"
+        private const val KEY_OUTPUT_DIR_LABEL = "output_dir_label"
         private const val KEY_MAX_MB = "max_mb"
         private const val KEY_INCLUDE_OVERSIZE = "include_oversize"
         private const val KEY_RETRIES = "retries"

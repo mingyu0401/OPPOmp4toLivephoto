@@ -102,14 +102,13 @@ class ConvertViewModel(app: Application) : AndroidViewModel(app) {
         batchJob?.cancel()
     }
 
-    fun start(relativePathDraft: String) {
+    fun start() {
         if (running || sources.isEmpty()) return
         running = true
         done = 0
         results = emptyList()
 
-        val relativePath = AppPreferences.normalizePath(relativePathDraft)
-        prefs.setRelativePath(relativePath)
+        val outputTree = prefs.getOutputTreeUri()?.let(Uri::parse)
         val maxMB = prefs.getMaxMB().toLong()
         val includeOversize = prefs.getIncludeOversize()
         val retries = prefs.getRetries()
@@ -124,7 +123,7 @@ class ConvertViewModel(app: Application) : AndroidViewModel(app) {
                             coroutineContext.ensureActive()
                             val result = limiter.withPermit {
                                 try {
-                                    converter.convert(uri, relativePath, maxMB, includeOversize, retries)
+                                    converter.convertToOutput(uri, outputTree, maxMB, includeOversize, retries)
                                 } catch (e: CancellationException) {
                                     throw e
                                 } catch (e: Exception) {

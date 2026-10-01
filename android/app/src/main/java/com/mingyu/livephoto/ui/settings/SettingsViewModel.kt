@@ -1,7 +1,10 @@
 package com.mingyu.livephoto.ui.settings
 
 import android.app.Application
+import android.net.Uri
+import android.provider.DocumentsContract
 import androidx.lifecycle.AndroidViewModel
+import com.mingyu.livephoto.DEFAULT_OUTPUT_DIR
 import com.mingyu.livephoto.data.AppPreferences
 import com.mingyu.livephoto.model.ThemeColor
 import com.mingyu.livephoto.model.ThemeMode
@@ -13,6 +16,7 @@ import kotlinx.coroutines.flow.asStateFlow
 class SettingsViewModel(app: Application) : AndroidViewModel(app) {
 
     private val prefs = AppPreferences.get(app.applicationContext)
+    private val resolver = app.applicationContext.contentResolver
 
     private val _themeMode = MutableStateFlow(prefs.getThemeMode())
     val themeMode: StateFlow<ThemeMode> = _themeMode.asStateFlow()
@@ -20,8 +24,13 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
     private val _themeColor = MutableStateFlow(prefs.getThemeColor())
     val themeColor: StateFlow<ThemeColor> = _themeColor.asStateFlow()
 
-    private val _relativePath = MutableStateFlow(prefs.getRelativePath())
-    val relativePath: StateFlow<String> = _relativePath.asStateFlow()
+    /** 导出目录的 SAF tree URI；null 表示用默认 Download/mingyuoutput */
+    private val _outputTree = MutableStateFlow(prefs.getOutputTreeUri()?.let(Uri::parse))
+    val outputTree: StateFlow<Uri?> = _outputTree.asStateFlow()
+
+    /** 已选导出目录的显示名（如 mingyuoutput）；未选择时显示默认目录 */
+    private val _outputDirLabel = MutableStateFlow(prefs.getOutputDirLabel() ?: DEFAULT_OUTPUT_DIR)
+    val outputDirLabel: StateFlow<String> = _outputDirLabel.asStateFlow()
 
     private val _maxMB = MutableStateFlow(prefs.getMaxMB())
     val maxMB: StateFlow<Int> = _maxMB.asStateFlow()
@@ -56,14 +65,25 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
         _themeColor.value = color
     }
 
-    /** 输入过程中允许中间态，失焦/开始转换时再落盘 */
-    fun setRelativePathDraft(path: String) {
-        _relativePath.value = path
-    }
-
-    fun commitRelativePath() {
-        prefs.setRelativePath(_relativePath.value)
-        _relativePath.value = prefs.getRelativePath()
+    /** 系统选择器返回的导出目录；权限与显示名一并落盘 */
+    fun setOutputTree(treeUri: Uri) {
+        // 实测 API 36：直接查 tree URI 会抛 UnsupportedOperationException，必须查其 document URI
+        val label = runCatching {
+            val docUri = DocumentsContract.buildDocumentUriUsingTree(
+                treeUri,
+                DocumentsContract.getTreeDocumentId(treeUri),
+            )
+            resolver.query(
+                docUri,
+                arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME),
+                null,
+                null,
+                null,
+            )?.use { c -> if (c.moveToFirst() && !c.isNull(0)) c.getString(0) else null }
+        }.getOrNull() ?: "已选择的目录"
+        prefs.setOutputTree(treeUri.toString(), label)
+        _outputTree.value = treeUri
+        _outputDirLabel.value = label
     }
 
     fun setMaxMB(mb: Int) {

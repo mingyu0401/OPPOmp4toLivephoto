@@ -1,7 +1,9 @@
 package com.mingyu.livephoto
 
+import android.content.ContentUris
 import android.content.ContentValues
 import android.media.MediaMetadataRetriever
+import android.os.Environment
 import android.provider.MediaStore
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -128,5 +130,59 @@ class LivePhotoPipelineAndroidTest {
             video.delete()
         }
         File(ctx.getExternalFilesDir(null), "probe.txt").writeText(report.toString())
+    }
+
+    /** 用户需求回归：转换产物的文件时间戳必须与源视频一致（默认 Downloads 路径） */
+    @Test
+    fun downloadsOutputCarriesSourceTimestamp() {
+        assumeAssetsPresent()
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val ctx = instrumentation.targetContext
+        val resolver = ctx.contentResolver
+
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, "MingYuTsSource.mp4")
+            put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
+            put(MediaStore.MediaColumns.RELATIVE_PATH, "Movies")
+            put(MediaStore.MediaColumns.IS_PENDING, 1)
+        }
+        val videoUri = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
+            ?: error("无法插入测试视频")
+        instrumentation.context.assets.open("rotated.mp4").use { input ->
+            resolver.openOutputStream(videoUri)!!.use { output -> input.copyTo(output) }
+        }
+        values.clear()
+        values.put(MediaStore.MediaColumns.IS_PENDING, 0)
+        resolver.update(videoUri, values, null, null)
+
+        val srcMtimeMs = resolver.query(
+            videoUri,
+            arrayOf(MediaStore.MediaColumns.DATE_MODIFIED),
+            null, null, null,
+        )?.use { c -> if (c.moveToFirst() && !c.isNull(0)) c.getLong(0) * 1000 else 0L } ?: 0L
+        assumeTrue("provider 未回写 date_modified，跳过", srcMtimeMs > 0L)
+
+        val result = runBlocking {
+            LivePhotoConverter(ctx).convertToOutput(videoUri, null, 50L, false, 0)
+        }
+        assertEquals("转换应成功: ${result.detail}", Status.OK, result.status)
+
+        val name = result.detail.substringAfterLast('/')
+        val raw = File(Environment.getExternalStorageDirectory(), "$DEFAULT_OUTPUT_DIR/$name")
+        assertTrue("产物应存在于 $raw", raw.exists())
+        assertEquals("产物文件时间戳应等于源视频", srcMtimeMs, raw.lastModified())
+
+        val outRow = resolver.query(
+            MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+            arrayOf(MediaStore.MediaColumns._ID),
+            "${MediaStore.MediaColumns.DISPLAY_NAME} = ?",
+            arrayOf(name),
+            null,
+        )?.use { c ->
+            if (c.moveToFirst()) ContentUris.withAppendedId(MediaStore.Downloads.EXTERNAL_CONTENT_URI, c.getLong(0)) else null
+        }
+        outRow?.let { resolver.delete(it, null, null) }
+        resolver.delete(videoUri, null, null)
+        raw.delete()
     }
 }

@@ -45,7 +45,7 @@ import com.mingyu.livephoto.ui.settings.SettingsViewModel
 @Composable
 fun ConvertScreen(convertViewModel: ConvertViewModel, settingsViewModel: SettingsViewModel) {
     val context = LocalContext.current
-    val relativePath by settingsViewModel.relativePath.collectAsStateWithLifecycle()
+    val outputDirLabel by settingsViewModel.outputDirLabel.collectAsStateWithLifecycle()
     val maxMB by settingsViewModel.maxMB.collectAsStateWithLifecycle()
     val includeOversize by settingsViewModel.includeOversize.collectAsStateWithLifecycle()
 
@@ -86,7 +86,7 @@ fun ConvertScreen(convertViewModel: ConvertViewModel, settingsViewModel: Setting
             Text(
                 "可用系统选择器挑单个视频，或直接选一个文件夹（含子文件夹里的 MP4/MOV 全部导入）。" +
                     "选中的视频会转成 OPPO 相册可识别的实况照片（.JPG，封面 + 内嵌 MP4），" +
-                    "直接写入相册目录，不覆盖原视频。",
+                    "写入导出目录，不覆盖原视频。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -130,13 +130,13 @@ fun ConvertScreen(convertViewModel: ConvertViewModel, settingsViewModel: Setting
                     )
                 }
                 Text(
-                    "输出：$relativePath · " + if (includeOversize) "包含超大视频" else "超过 $maxMB MB 跳过",
+                    "输出：$outputDirLabel · " + if (includeOversize) "包含超大视频" else "超过 $maxMB MB 跳过",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 6.dp),
                 )
                 Button(
-                    onClick = { convertViewModel.start(relativePath) },
+                    onClick = { convertViewModel.start() },
                     enabled = !running && total > 0,
                     modifier = Modifier
                         .fillMaxWidth()
@@ -181,6 +181,11 @@ fun ConvertScreen(convertViewModel: ConvertViewModel, settingsViewModel: Setting
                         )
                     }
                 }
+                Text(
+                    "完成后可使用 MT 管理器自行转移至 DCIM/Camera，相册即可识别为实况。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.tertiary,
+                )
             }
         }
     }

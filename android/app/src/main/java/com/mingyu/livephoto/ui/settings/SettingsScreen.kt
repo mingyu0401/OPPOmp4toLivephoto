@@ -1,6 +1,10 @@
 package com.mingyu.livephoto.ui.settings
 
+import android.content.Intent
+import android.provider.DocumentsContract
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -23,6 +27,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.DarkMode
+import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Tune
@@ -32,13 +37,12 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -65,7 +69,7 @@ private enum class SubPage { APPEARANCE, THEME_COLOR }
 fun SettingsScreen(viewModel: SettingsViewModel) {
     val themeMode by viewModel.themeMode.collectAsStateWithLifecycle()
     val themeColor by viewModel.themeColor.collectAsStateWithLifecycle()
-    val relativePath by viewModel.relativePath.collectAsStateWithLifecycle()
+    val outputDirLabel by viewModel.outputDirLabel.collectAsStateWithLifecycle()
     val maxMB by viewModel.maxMB.collectAsStateWithLifecycle()
     val includeOversize by viewModel.includeOversize.collectAsStateWithLifecycle()
     val retries by viewModel.retries.collectAsStateWithLifecycle()
@@ -83,6 +87,22 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
         }.getOrNull() ?: "1.0"
     }
 
+    val dirPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { treeUri ->
+        if (treeUri != null) {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    treeUri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+                )
+            }
+            viewModel.setOutputTree(treeUri)
+        }
+    }
+    // 选择器默认停在 Download，mingyuoutput 子文件夹由默认导出自动创建
+    val pickerInitialDir = remember {
+        DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", "primary:Download")
+    }
+
     Scaffold { padding ->
         Column(
             modifier = Modifier
@@ -96,13 +116,14 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
                     themeMode = themeMode,
                     themeColor = themeColor,
                     darkTheme = darkTheme,
-                    relativePath = relativePath,
+                    outputDirLabel = outputDirLabel,
                     maxMB = maxMB,
                     includeOversize = includeOversize,
                     retries = retries,
                     versionName = versionName,
                     onOpenSubPage = { subPage = it },
                     onOpenAbout = { showAbout = true },
+                    onPickDir = { dirPicker.launch(pickerInitialDir) },
                 )
 
                 SubPage.APPEARANCE -> subPageScaffold("深色模式", onBack = { subPage = null }) {
@@ -162,14 +183,14 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
     if (showAbout) {
         AlertDialog(
             onDismissRequest = { showAbout = false },
-            title = { Text("关于 MingYu实况") },
+            title = { Text("关于 明雨实况") },
             text = {
                 Text(
                     "把普通视频转成 OPPO/一加相册能识别为「实况」的照片：\n" +
                         "JPEG 段序 [XMP(GCamera+OpCamera) / EXIF(UserComment=oplus_8388608) / MPF / JFIF / ICC] " +
                         "+ 封面帧 + 零间隙拼接的原始 MP4。\n\n" +
                         "封面取视频中点帧，时间戳按视频旋转信息转正；" +
-                        "输出目录、大小阈值、重试次数等都可在设置页调整。\n\n" +
+                        "默认导出到 Download/mingyuoutput，也可在设置页换成其他目录；大小阈值、重试次数等都可调整。\n\n" +
                         "版本 $versionName，与桌面版脚本 mp4_to_oppo_livephoto.py 使用同一套字节格式。",
                 )
             },
@@ -186,13 +207,14 @@ private fun mainList(
     themeMode: ThemeMode,
     themeColor: ThemeColor,
     darkTheme: Boolean,
-    relativePath: String,
+    outputDirLabel: String,
     maxMB: Int,
     includeOversize: Boolean,
     retries: Int,
     versionName: String,
     onOpenSubPage: (SubPage) -> Unit,
     onOpenAbout: () -> Unit,
+    onPickDir: () -> Unit,
 ) {
     Row(
         modifier = Modifier
@@ -220,17 +242,17 @@ private fun mainList(
     )
 
     ListItem(
-        headlineContent = { Text("输出相册目录") },
-        supportingContent = { Text("实况照片写入内部存储的该目录，例如 DCIM/Camera") },
-        leadingContent = { Icon(Icons.Filled.Tune, contentDescription = null) },
+        headlineContent = { Text("导出目录") },
+        supportingContent = { Text("默认 $outputDirLabel，点此用系统选择器改到其他文件夹") },
+        leadingContent = { Icon(Icons.Filled.FolderOpen, contentDescription = null) },
+        trailingContent = { Chevron() },
+        modifier = Modifier.clickable(onClick = onPickDir),
     )
-    OutlinedTextField(
-        value = relativePath,
-        onValueChange = { viewModel.setRelativePathDraft(it) },
-        singleLine = true,
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp),
+    Text(
+        "转换完成后可用 MT 管理器把文件自行转移至 DCIM/Camera，相册即可识别为实况。",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(horizontal = 16.dp),
     )
 
     ListItem(
